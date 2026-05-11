@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>ProxyOS — Multiplayer World</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+#canvas { width:100vw; height:100vh; display:block; }
+#hud {
+  position:fixed; top:20px; left:20px;
+  color:#00ffcc; font-size:11px; letter-spacing:3px;
+  line-height:2; pointer-events:none;
+  text-shadow:0 0 10px #00ffcc44;
+}
+#players-list {
+  position:fixed; top:20px; right:20px;
+  color:#00d4ff; font-size:10px; letter-spacing:2px;
+  line-height:2; text-align:right;
+}
+#crosshair {
+  position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  width:20px; height:20px; pointer-events:none;
+}
+#crosshair::before, #crosshair::after {
+  content:''; position:absolute;
+  background:#00ffcc88;
+}
+#crosshair::before { width:1px; height:100%; left:50%; top:0; }
+#crosshair::after  { width:100%; height:1px; top:50%; left:0; }
+#controls {
+  position:fixed; bottom:20px; left:50%;
+  transform:translateX(-50%);
+  color:#00d4ff33; font-size:9px; letter-spacing:4px;
+}
+#minimap {
+  position:fixed; bottom:20px; right:20px;
+  width:120px; height:120px;
+  border:1px solid #00d4ff22;
+  background:#010810cc;
+  overflow:hidden;
+}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <div style="color:#00ffcc;font-size:13px;letter-spacing:4px;margin-bottom:4px">PROXWORLD</div>
+  <div>PLAYER: <span id="hud-id">—</span></div>
+  <div>POS: <span id="hud-pos">0, 0, 0</span></div>
+  <div>PLAYERS: <span id="hud-count">0</span></div>
+</div>
+<div id="players-list"></div>
+<div id="crosshair"></div>
+<div id="controls">WASD MOVE · MOUSE LOOK · SHIFT RUN · SPACE JUMP</div>
+<canvas id="minimap"></canvas>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script>
+const canvas = document.getElementById('canvas')
+const engine = new BABYLON.Engine(canvas, true)
+const scene = new BABYLON.Scene(engine)
+
+scene.clearColor = new BABYLON.Color4(0.01, 0.02, 0.06, 1)
+scene.fogMode = BABYLON.Scene.FOGMODE_EXP2
+scene.fogColor = new BABYLON.Color3(0.02, 0.05, 0.1)
+scene.fogDensity = 0.018
+
+// ============ CÁMARA TERCERA PERSONA ============
+const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/2, Math.PI/3, 12, BABYLON.Vector3.Zero(), scene)
+camera.lowerRadiusLimit = 4
+camera.upperRadiusLimit = 20
+camera.upperBetaLimit = Math.PI/2.2
+camera.attachControl(canvas, true)
+
+// ============ LUCES ============
+const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1,-2,-1), scene)
+sun.intensity = 1.2
+sun.diffuse = new BABYLON.Color3(0.9, 0.95, 1)
+
+const ambient = new BABYLON.HemisphericLight('amb', new BABYLON.Vector3(0,1,0), scene)
+ambient.intensity = 0.4
+ambient.diffuse = new BABYLON.Color3(0.3, 0.5, 0.8)
+ambient.groundColor = new BABYLON.Color3(0.05, 0.15, 0.05)
+
+const glow = new BABYLON.GlowLayer('glow', scene)
+glow.intensity = 0.6
+
+// ============ TERRENO ============
+const ground = BABYLON.MeshBuilder.CreateGround('ground', { width:200, height:200, subdivisions:50 }, scene)
+const groundMat = new BABYLON.StandardMaterial('gm', scene)
+groundMat.diffuseColor = new BABYLON.Color3(0.04, 0.18, 0.06)
+groundMat.specularColor = new BABYLON.Color3(0,0,0)
+ground.material = groundMat
+
+// Colinas procedurales
+const positions = ground.getVerticesData(BABYLON.VertexBuffer.PositionKind)
+for (let i = 0; i < positions.length; i += 3) {
+  const x = positions[i], z = positions[i+2]
+  positions[i+1] = Math.sin(x*0.15)*3 + Math.cos(z*0.12)*2
+               + Math.sin(x*0.3+z*0.2)*1.5
+               + Math.sin(x*0.05)*5 + Math.cos(z*0.07)*4
+}
+ground.updateVerticesData(BABYLON.VertexBuffer.PositionKind, positions)
+ground.createNormals(true)
+
+// ============ CRISTALES ALIENÍGENAS ============
+for (let i = 0; i < 60; i++) {
+  const h = 2 + Math.random()*8
+  const c = BABYLON.MeshBuilder.CreateCylinder('cr'+i, {
+    height:h, diameterTop: 0.2+Math.random()*0.5,
+    diameterBottom: 0.5+Math.random(), tessellation:5
+  }, scene)
+  c.position = new BABYLON.Vector3(
+    (Math.random()-0.5)*160,
+    h/2 + getHeightAt(c.position.x, c.position.z),
+    (Math.random()-0.5)*160
+  )
+  c.rotation.y = Math.random()*Math.PI
+  const mat = new BABYLON.StandardMaterial('cm'+i, scene)
+  mat.emissiveColor = Math.random()>0.5
+    ? new BABYLON.Color3(0, 0.8+Math.random()*0.2, 0.6+Math.random()*0.4)
+    : new BABYLON.Color3(0.4+Math.random()*0.3, 0, 0.8+Math.random()*0.2)
+  mat.alpha = 0.7 + Math.random()*0.3
+  c.material = mat
+}
+
+// ============ ÁRBOLES ALIEN ============
+for (let i = 0; i < 40; i++) {
+  const trunk = BABYLON.MeshBuilder.CreateCylinder('tr'+i, {
+    height:3+Math.random()*4, diameter:0.3+Math.random()*0.3, tessellation:6
+  }, scene)
+  const tx = (Math.random()-0.5)*140, tz = (Math.random()-0.5)*140
+  const ty = getHeightAt(tx, tz)
+  trunk.position = new BABYLON.Vector3(tx, ty+2, tz)
+  const tmat = new BABYLON.StandardMaterial('tm'+i, scene)
+  tmat.diffuseColor = new BABYLON.Color3(0.1, 0.25, 0.05)
+  trunk.material = tmat
+
+  const crown = BABYLON.MeshBuilder.CreateSphere('cr'+i, { diameter: 3+Math.random()*3 }, scene)
+  crown.position = new BABYLON.Vector3(tx, ty+5+Math.random()*2, tz)
+  crown.scaling.y = 0.7
+  const cmat = new BABYLON.StandardMaterial('crm'+i, scene)
+  cmat.diffuseColor = new BABYLON.Color3(0.05, 0.3+Math.random()*0.2, 0.05)
+  cmat.emissiveColor = new BABYLON.Color3(0, 0.05, 0)
+  crown.material = cmat
+}
+
+// ============ RÍO / LAGO ============
+const lake = BABYLON.MeshBuilder.CreateGround('lake', { width:30, height:30 }, scene)
+lake.position = new BABYLON.Vector3(20, 0.2, 20)
+const lakeMat = new BABYLON.StandardMaterial('lm', scene)
+lakeMat.diffuseColor = new BABYLON.Color3(0, 0.3, 0.5)
+lakeMat.emissiveColor = new BABYLON.Color3(0, 0.05, 0.15)
+lakeMat.alpha = 0.75
+lake.material = lakeMat
+
+// ============ PARTÍCULAS ESPORAS ============
+const spores = new BABYLON.ParticleSystem('spores', 300, scene)
+spores.emitter = new BABYLON.Vector3(0, 3, 0)
+spores.minEmitBox = new BABYLON.Vector3(-50, 0, -50)
+spores.maxEmitBox = new BABYLON.Vector3(50, 8, 50)
+spores.color1 = new BABYLON.Color4(0, 1, 0.7, 0.4)
+spores.color2 = new BABYLON.Color4(0.5, 0, 1, 0.2)
+spores.minSize = 0.05; spores.maxSize = 0.2
+spores.minLifeTime = 4; spores.maxLifeTime = 8
+spores.emitRate = 40
+spores.direction1 = new BABYLON.Vector3(-0.5, 1, -0.5)
+spores.direction2 = new BABYLON.Vector3(0.5, 2, 0.5)
+spores.minEmitPower = 0.2; spores.maxEmitPower = 0.8
+spores.start()
+
+// ============ JUGADOR LOCAL ============
+function getHeightAt(x, z) {
+  return Math.sin(x*0.15)*3 + Math.cos(z*0.12)*2
+       + Math.sin(x*0.3+z*0.2)*1.5
+       + Math.sin(x*0.05)*5 + Math.cos(z*0.07)*4
+}
+
+function createPlayerMesh(id, color, isLocal) {
+  const body = BABYLON.MeshBuilder.CreateCapsule('p_'+id, { height:2, radius:0.5 }, scene)
+  const mat = new BABYLON.StandardMaterial('pm_'+id, scene)
+  const c = hexToColor3(color)
+  mat.diffuseColor = c
+  mat.emissiveColor = new BABYLON.Color3(c.r*0.3, c.g*0.3, c.b*0.3)
+  body.material = mat
+
+  // Indicador nombre
+  if (!isLocal) {
+    const label = BABYLON.MeshBuilder.CreatePlane('lbl_'+id, { width:2, height:0.5 }, scene)
+    label.position.y = 1.5
+    label.parent = body
+    label.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL
+    const lmat = new BABYLON.StandardMaterial('lm_'+id, scene)
+    lmat.emissiveColor = new BABYLON.Color3(0, 0.8, 1)
+    lmat.disableLighting = true
+    label.material = lmat
+  }
+
+  return body
+}
+
+function hexToColor3(hsl) {
+  return new BABYLON.Color3(
+    0.2 + Math.random()*0.6,
+    0.4 + Math.random()*0.4,
+    0.8 + Math.random()*0.2
+  )
+}
+
+// ============ SOCKET.IO ============
+const socket = io('http://localhost:4000')
+let myId = null
+const remotePlayers = {}
+
+socket.on('init', ({ id, players }) => {
+  myId = id
+  document.getElementById('hud-id').textContent = id.slice(0,8).toUpperCase()
+
+  Object.values(players).forEach(p => {
+    if (p.id !== myId) addRemotePlayer(p)
+  })
+  updatePlayerList(players)
+})
+
+socket.on('player_joined', (p) => {
+  addRemotePlayer(p)
+  updatePlayerCount()
+})
+
+socket.on('player_moved', (p) => {
+  if (remotePlayers[p.id]) {
+    remotePlayers[p.id].position.x = p.x
+    remotePlayers[p.id].position.y = p.y
+    remotePlayers[p.id].position.z = p.z
+    remotePlayers[p.id].rotation.y = p.rotY
+  }
+})
+
+socket.on('player_left', (id) => {
+  if (remotePlayers[id]) {
+    remotePlayers[id].dispose()
+    delete remotePlayers[id]
+    updatePlayerCount()
+  }
+})
+
+function addRemotePlayer(p) {
+  const mesh = createPlayerMesh(p.id, p.color, false)
+  mesh.position = new BABYLON.Vector3(p.x, p.y, p.z)
+  remotePlayers[p.id] = mesh
+  updatePlayerCount()
+}
+
+function updatePlayerCount() {
+  const count = Object.keys(remotePlayers).length + 1
+  document.getElementById('hud-count').textContent = count
+}
+
+function updatePlayerList(players) {
+  const list = document.getElementById('players-list')
+  list.innerHTML = Object.values(players).map(p =>
+    `<div style="color:${p.id === myId ? '#00ffcc' : '#00d4ff88'}">${p.name}</div>`
+  ).join('')
+}
+
+// ============ JUGADOR LOCAL — movimiento ============
+const localPlayer = createPlayerMesh('local', '#00ffcc', true)
+localPlayer.position = new BABYLON.Vector3(0, 2, 0)
+
+camera.setTarget(localPlayer.position)
+camera.parent = null
+
+const keys = {}
+window.addEventListener('keydown', e => keys[e.code] = true)
+window.addEventListener('keyup', e => keys[e.code] = false)
+
+let velY = 0
+const GRAVITY = -0.015
+const JUMP = 0.3
+let lastMove = Date.now()
+
+scene.registerBeforeRender(() => {
+  const speed = keys['ShiftLeft'] ? 0.18 : 0.09
+  const camYaw = camera.alpha + Math.PI/2
+
+  let moved = false
+  let dx = 0, dz = 0
+
+  if (keys['KeyW'] || keys['ArrowUp'])    { dx -= Math.sin(camYaw)*speed; dz -= Math.cos(camYaw)*speed; moved=true }
+  if (keys['KeyS'] || keys['ArrowDown'])  { dx += Math.sin(camYaw)*speed; dz += Math.cos(camYaw)*speed; moved=true }
+  if (keys['KeyA'] || keys['ArrowLeft'])  { dx -= Math.cos(camYaw)*speed; dz += Math.sin(camYaw)*speed; moved=true }
+  if (keys['KeyD'] || keys['ArrowRight']) { dx += Math.cos(camYaw)*speed; dz -= Math.sin(camYaw)*speed; moved=true }
+
+  localPlayer.position.x += dx
+  localPlayer.position.z += dz
+
+  if (moved) {
+    localPlayer.rotation.y = Math.atan2(dx, dz)
+  }
+
+  // Gravedad y salto
+  const groundY = getHeightAt(localPlayer.position.x, localPlayer.position.z) + 1
+  if (keys['Space'] && localPlayer.position.y <= groundY + 0.1) velY = JUMP
+  velY += GRAVITY
+  localPlayer.position.y += velY
+  if (localPlayer.position.y < groundY) { localPlayer.position.y = groundY; velY = 0 }
+
+  // Cámara sigue jugador
+  camera.target = BABYLON.Vector3.Lerp(camera.target, localPlayer.position, 0.1)
+
+  // HUD
+  const p = localPlayer.position
+  document.getElementById('hud-pos').textContent =
+    `${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`
+
+  // Enviar posición al servidor
+  if (moved && Date.now() - lastMove > 50) {
+    socket.emit('move', {
+      x: p.x, y: p.y, z: p.z,
+      rotY: localPlayer.rotation.y
+    })
+    lastMove = Date.now()
+  }
+})
+
+// Minimap
+const miniCtx = document.getElementById('minimap').getContext('2d')
+const minimap = document.getElementById('minimap')
+minimap.width = 120; minimap.height = 120
+setInterval(() => {
+  miniCtx.fillStyle = '#010810'
+  miniCtx.fillRect(0,0,120,120)
+  const scale = 120/200
+  const cx = 60 + localPlayer.position.x * scale
+  const cy = 60 + localPlayer.position.z * scale
+  // otros jugadores
+  Object.values(remotePlayers).forEach(rp => {
+    miniCtx.fillStyle = '#00d4ff88'
+    miniCtx.beginPath()
+    miniCtx.arc(60 + rp.position.x*scale, 60 + rp.position.z*scale, 3, 0, Math.PI*2)
+    miniCtx.fill()
+  })
+  // yo
+  miniCtx.fillStyle = '#00ffcc'
+  miniCtx.beginPath()
+  miniCtx.arc(cx, cy, 4, 0, Math.PI*2)
+  miniCtx.fill()
+}, 100)
+
+engine.runRenderLoop(() => scene.render())
+window.addEventListener('resize', () => engine.resize())
+</script>
+</body>
+</html>
