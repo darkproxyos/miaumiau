@@ -160,6 +160,10 @@ export default function Game() {
     socket.on("state", (state: Record<string, any>) => {
       for (const id in state) {
         const data = state[id];
+
+        // SEGURIDAD: datos incompletos = ignorar frame
+        if (!data?.position || !data?.velocity) continue;
+
         const isMe = id === myId;
 
         if (!players[id]) {
@@ -169,13 +173,14 @@ export default function Game() {
           const mat = new StandardMaterial("mat_" + id, scene);
 
           const av = AVATARS[data.avatarIdx ?? 0];
-          mat.diffuseColor  = new Color3(...(av?.color    ?? myColor)    as [number,number,number]);
-          mat.emissiveColor = new Color3(...(av?.emissive ?? myEmissive) as [number,number,number]);
+          mat.diffuseColor  = new Color3(...(av?.color    ?? myColor)    as [number, number, number]);
+          mat.emissiveColor = new Color3(...(av?.emissive ?? myEmissive) as [number, number, number]);
           mat.specularColor = new Color3(0.3, 0.3, 0.3);
           body.material = mat;
           body.parent = parent;
 
           const earBase = { height: 0.4, diameterTop: 0, diameterBottom: 0.4, tessellation: 3 };
+
           const earL = MeshBuilder.CreateCylinder("earL_" + id, earBase, scene);
           earL.position = new Vector3(-0.25, 0.85, 0);
           earL.rotation.z = Math.PI / 6;
@@ -209,10 +214,15 @@ export default function Game() {
         const { mesh, nameTag } = players[id];
         if (data.name && nameTag.text !== data.name) nameTag.text = data.name;
 
-        const target = new Vector3(data.position.x, 0, data.position.z);
+        const px = data.position.x ?? 0;
+        const pz = data.position.z ?? 0;
+        const vx = data.velocity.x ?? 0;
+        const vz = data.velocity.z ?? 0;
+
+        const target = new Vector3(px, 0, pz);
         mesh.position = Vector3.Lerp(mesh.position, target, 0.3);
 
-        const moving = Math.abs(data.velocity.x) > 0.1 || Math.abs(data.velocity.z) > 0.1;
+        const moving = Math.abs(vx) > 0.1 || Math.abs(vz) > 0.1;
         mesh.position.y = moving ? Math.sin(Date.now() * 0.015) * 0.15 : 0;
 
         if (isMe) {
